@@ -11,10 +11,26 @@ from langchain.prompts import PromptTemplate
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import os
+import yaml
+import argparse
 
-os.environ["OPENAI_API_KEY"] = "Insert API Key"
 
-loader = DirectoryLoader("C:/Users/lanci/OneDrive/Documents/knowledge_base", loader_cls=Docx2txtLoader)
+parser = argparse.ArgumentParser(
+    prog="Cover Letter Writer",
+    description="Writes a cover letter for you based on a corpus of resume's and cover letters you create."
+)
+parser.add_argument('config', type=str)
+
+args = parser.parse_args()
+
+print(os.getcwd())
+yaml_path = os.path.join(".", "configs", args.config)
+with open(yaml_path, 'r') as file:
+    config = yaml.safe_load(file)
+
+os.environ["OPENAI_API_KEY"] = config["openai_key"]
+
+loader = DirectoryLoader(config["knowledge_base_path"], loader_cls=Docx2txtLoader)
 docs = loader.load()
 
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
@@ -22,9 +38,9 @@ splits = text_splitter.split_documents(docs)
 vectorstore = Chroma.from_documents(documents=splits, embedding=OpenAIEmbeddings())
 
 # Retrieve and generate using the relevant snippets of the blog.
-retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 6})
-prompt = hub.pull("rlm/rag-prompt")
+retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 8})
 llm = ChatOpenAI(model_name="gpt-4", temperature=0.9)
+corrector_llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0.7)
 
 
 def format_docs(docs):
@@ -34,9 +50,10 @@ def format_docs(docs):
 cover_letter_template = PromptTemplate(
     input_variables=['context', 'description'],
     template='You are an assistant for writing cover letters. Write up to 5 paragraphs describing why I would be a '
-             'good fit for the position. Do not make up expertise or experience that I dont have listed on my resume.'
+             'good fit for the position. Do not make up expertise or experience that I do not have listed on my resume.'
              'Do tell stories you find written in the example cover letters if they apply.'
-             'Write me a cover letter for the following position. \nContext:{context}'
+             'Write me a cover letter for the following position. '
+             '\nContext:{context}'
              '\nDescription: {description}'
 )
 
@@ -64,28 +81,30 @@ initial_chain = (
 )
 
 corrector_chain = (
-    {"context": retriever | format_docs, "cover_letter": RunnablePassthrough()}
-    | corrector_template
-    | llm
-    | StrOutputParser()
+        {"context": retriever | format_docs, "cover_letter": RunnablePassthrough()}
+        | corrector_template
+        | corrector_llm
+        | StrOutputParser()
 )
 
 refinement_chain = (
-    {"cover_letter": RunnablePassthrough(), "corrections": RunnablePassthrough()}
-    |refiner_template
-    |llm
-    |StrOutputParser()
+        {"cover_letter": RunnablePassthrough(), "corrections": RunnablePassthrough()}
+        | refiner_template
+        | corrector_llm
+        | StrOutputParser()
 )
 
-
 # app framework
-st.title("What's the job description?")
+st.title("Cover Letter Writer")
 description = st.text_area("Paste the Job Description Here!")
 
 if description:
     response = initial_chain.invoke(description)
+    st.markdown(response)
     correction = corrector_chain.invoke(response)
-    refinement = refinement_chain.invoke([response, correction])
-    st.text(refinement)
+    st.markdown(correction)
+    if "no mistakes" not in correction:
+        refinement = refinement_chain.invoke([response, correction])
+        st.markdown(refinement)
 
 vectorstore.delete_collection()
